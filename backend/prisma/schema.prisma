@@ -1,0 +1,75 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Mail_Category {
+  SALES
+  PURCHASE
+  COLLABORATION
+  PAYMENT
+}
+
+enum Missed_Mail_Status {
+  COMPLETED
+  PENDING
+}
+
+model Users {
+  id String @id @default(ulid())
+  email String @unique
+  password String @default("")
+  created_at DateTime
+  updated_at DateTime
+  name String
+  refresh_token String
+  access_token String
+  mails Mails[] @relation("users_mails")
+  missed_mails Missed[] @relation("missed_mails")
+}
+
+model Mails {
+  id String @id @default(ulid())
+  from String // email of sender
+  to String // email of reciever
+  user_id String
+  body String
+  html String
+  intent String
+  subject String
+  time String
+  mail_id String @unique
+  thread_id String
+  cc String
+  user Users @relation("users_mails" , fields: [user_id] , references: [id])
+  category Mail_Category
+  replies Replies[] @relation("mail_replies")
+}
+
+model Replies {
+  id String @id @default(ulid())
+  mail_id String
+  reply String
+  created_at String
+  updated_at String
+  mail Mails @relation("mail_replies" , fields: [mail_id] , references: [id])
+}
+
+model Missed {
+  mail_id String @unique
+  thread_id String
+  status Missed_Mail_Status
+  user_id String
+  user Users @relation("missed_mails" , fields: [user_id] , references: [id])
+}
+
+
+

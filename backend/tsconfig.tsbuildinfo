@@ -1,0 +1,1 @@
+{"root":["./src/auth.ts","./src/index.ts","./src/prisma.ts","./src/functions/createmail.ts","./src/functions/extractdetails.ts","./src/functions/mailparser.ts","./src/prompts/baseprompt.ts","./src/prompts/parserprompt.ts","./src/routes/auth.ts","./src/routes/mail.ts"],"version":"5.9.2"}
