@@ -64,7 +64,7 @@ function iterateArray(arr: any) {
 }
 
 // for extracting josn object form AI response
-function cleanAndParseAiResponse(str: string) {
+export function cleanAndParseAiResponse(str: string) {
     if (!str) {
         return
     }

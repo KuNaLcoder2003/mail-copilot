@@ -34,6 +34,7 @@ model Users {
   access_token String
   mails Mails[] @relation("users_mails")
   missed_mails Missed[] @relation("missed_mails")
+  thread_contexts ThreadContext[]
 }
 
 model Mails {
@@ -49,6 +50,7 @@ model Mails {
   mail_id String @unique
   thread_id String
   cc String
+  reply String @default("")
   user Users @relation("users_mails" , fields: [user_id] , references: [id])
   category Mail_Category
   replies Replies[] @relation("mail_replies")
@@ -69,6 +71,14 @@ model Missed {
   status Missed_Mail_Status
   user_id String
   user Users @relation("missed_mails" , fields: [user_id] , references: [id])
+}
+
+model ThreadContext {
+  id String @id @default(ulid())
+  thread_id String @unique
+  user_id String
+  context String
+  user Users @relation(fields: [user_id] , references: [id])
 }
 
 
