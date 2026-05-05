@@ -1,6 +1,21 @@
 import type React from "react";
-import { useEffect, useState } from "react";
-import { getMails } from "../api";
+import { useEffect, useState, useRef } from "react";
+import { getCompleteThread, getMails, sendDraftPrompt } from "../api";
+
+export interface ChatMessage {
+    id?: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    timestamp?: string;
+}
+
+interface DraftReplyChatModalProps {
+    threadId: string;
+    threadSubject: string;
+    onClose: () => void;
+    /** Optional: initial AI-generated draft to seed the conversation */
+    initialDraft?: string;
+}
 
 /**
  * Mail Copilot — Home (Inbox)
@@ -114,6 +129,7 @@ const Home: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [selectedMail, setSelectedMail] = useState<Mail | null>(null);
     const [filter, setFilter] = useState<string>("ALL");
+    const [isFullContextOpen, setFullContextOpen] = useState<boolean>(false)
 
     useEffect(() => {
         getMails()
@@ -627,12 +643,16 @@ const Home: React.FC = () => {
             </main>
 
             {/* ─────────── Detail drawer ─────────── */}
-            {selectedMail && (
+            {selectedMail && !isFullContextOpen && (
                 <DetailDrawer
+                    setFullContext={setFullContextOpen}
                     mail={selectedMail}
                     onClose={() => setSelectedMail(null)}
                 />
             )}
+            {
+                isFullContextOpen && <FullContextModal threadId={selectedMail.thread_id} onClose={setFullContextOpen} mail={selectedMail} />
+            }
         </div>
     );
 };
@@ -717,9 +737,10 @@ const LoadingRows: React.FC = () => (
     </>
 );
 
-const DetailDrawer: React.FC<{ mail: Mail; onClose: () => void }> = ({
+const DetailDrawer: React.FC<{ mail: Mail; onClose: () => void, setFullContext: React.Dispatch<React.SetStateAction<boolean>> }> = ({
     mail,
     onClose,
+    setFullContext
 }) => {
     const sender = parseFrom(mail.from);
     const cat = categoryStyle(mail.category);
@@ -907,26 +928,463 @@ const DetailDrawer: React.FC<{ mail: Mail; onClose: () => void }> = ({
                     </button>
                     <button
                         type="button"
-                        className="px-4 py-2.5 rounded-lg font-mono text-[11px] tracking-[0.18em] uppercase border"
+                        onClick={() => {
+                            console.log('Clicked')
+                            // onClose()
+                            setFullContext(true)
+                        }}
+                        className="px-4 py-2.5 rounded-lg font-mono text-[11px] tracking-[0.18em] uppercase border bg-red-500 text-white font-bold cursor-pointer"
                         style={{
                             borderColor: "rgba(245,242,237,0.15)",
                             color: "rgba(245,242,237,0.7)",
                         }}
                     >
-                        Archive
+                        Get Thread Context
                     </button>
                     <button
                         type="button"
+                        className="px-4 py-2.5 rounded-lg font-mono text-[11px] tracking-[0.18em] uppercase border bg-blue-500 text-white font-bold cursor-pointer"
+                        style={{
+                            borderColor: "rgba(245,242,237,0.15)",
+                            color: "rgba(245,242,237,0.7)",
+                        }}
+                    >
+                        Generate Thread Context
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export const FullContextModal: React.FC<{
+    threadId: string;
+    onClose: React.Dispatch<React.SetStateAction<boolean>>;
+    mail: Mail;
+}> = ({ threadId, onClose, mail }) => {
+    const cat = categoryStyle(mail.category);
+
+    const [mails, setMails] = useState<Mail[]>([]);
+    const [isLoading, setIsLoading] = useState<boolean>(false);
+    const [threadContext, setThreadContext] = useState<{ id: string, thread_id: string, user_id: string, context: string } | null>(null);
+    const [chatOpen, setChatOpen] = useState<boolean>(false);
+
+
+    useEffect(() => {
+        setIsLoading(true);
+        getCompleteThread(threadId)
+            .then(
+                (data: {
+                    data: { valid: boolean; mails: Mail[]; thread_context: { id: string, thread_id: string, user_id: string, context: string } };
+                }) => {
+                    if (data.data.valid) {
+                        setMails(data.data.mails);
+                        setThreadContext(data.data.thread_context);
+                    } else {
+                        setMails([]);
+                        setThreadContext(null);
+                    }
+                    setIsLoading(false);
+                }
+            )
+            .catch(() => {
+                setMails([]);
+                setThreadContext(null);
+                setIsLoading(false);
+            });
+    }, [threadId]);
+
+    // ESC to close
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if (e.key === "Escape") onClose(false);
+        };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+    }, [onClose]);
+
+    // Sort chronologically — oldest first, latest at bottom (natural reading order)
+    const sortedMails = [...mails].sort(
+        (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()
+    );
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-stretch justify-center">
+            {/* Backdrop */}
+            <div
+                style={{
+                    background: "rgba(10,11,15,0.75)",
+                    backdropFilter: "blur(6px)",
+                }}
+                onClick={() => onClose(false)}
+                className="drawer-backdrop absolute inset-0"
+            />
+
+            {/* Modal panel — full-height, centered, max-w-5xl */}
+            <div
+                className="drawer-panel relative h-full w-full max-w-5xl flex flex-col"
+                style={{
+                    background: "#0F1015",
+                    borderLeft: "1px solid rgba(245,242,237,0.08)",
+                    borderRight: "1px solid rgba(245,242,237,0.08)",
+                    boxShadow: "0 0 80px -10px rgba(0,0,0,0.85)",
+                }}
+            >
+                {/* ─── Header ─── */}
+                <div
+                    className="flex items-center justify-between px-7 py-5 flex-none"
+                    style={{ borderBottom: "1px solid rgba(245,242,237,0.06)" }}
+                >
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                        <span
+                            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full border font-mono text-[10px] tracking-[0.18em] uppercase flex-none"
+                            style={{
+                                background: cat.bg,
+                                color: cat.fg,
+                                borderColor: cat.border,
+                            }}
+                        >
+                            <span
+                                className="h-1 w-1 rounded-full"
+                                style={{ background: cat.fg }}
+                            />
+                            {mail.category?.toLowerCase() || "uncategorized"}
+                        </span>
+                        <span className="font-mono text-[10px] tracking-[0.22em] uppercase opacity-40">
+                            · Thread {mail.thread_id?.slice(0, 10) || mail.id.slice(0, 10)}
+                        </span>
+                        {!isLoading && sortedMails.length > 0 && (
+                            <span className="font-mono text-[10px] tracking-[0.22em] uppercase opacity-40">
+                                · {sortedMails.length}{" "}
+                                {sortedMails.length === 1 ? "msg" : "msgs"}
+                            </span>
+                        )}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => onClose(false)}
+                        className="h-8 w-8 flex-none grid place-items-center rounded-md hover:bg-white/5 transition-colors"
+                        aria-label="Close"
+                    >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                            <path
+                                d="M6 6L18 18M6 18L18 6"
+                                stroke="#F5F2ED"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                            />
+                        </svg>
+                    </button>
+                </div>
+
+                {/* ─── Body (scrollable) ─── */}
+                <div className="body-scroll flex-1 overflow-y-auto px-7 py-7">
+                    {/* Subject */}
+                    <p className="font-mono text-[10px] tracking-[0.28em] uppercase opacity-50 mb-3">
+                        / Full thread context
+                    </p>
+                    <h2 className="font-serif-display text-[2rem] sm:text-[2.5rem] leading-[1.05] font-light mb-8">
+                        {mail.subject || "(no subject)"}
+                    </h2>
+
+                    {/* Thread-level Copilot summary */}
+                    {isLoading && (
+                        <div
+                            className="rounded-xl p-5 mb-8 border space-y-2"
+                            style={{
+                                background: "rgba(197,255,74,0.04)",
+                                borderColor: "rgba(197,255,74,0.18)",
+                            }}
+                        >
+                            <div className="h-3 w-40 shimmer rounded" />
+                            <div className="h-3 w-full shimmer rounded" />
+                            <div className="h-3 w-3/4 shimmer rounded" />
+                        </div>
+                    )}
+
+                    {!isLoading && threadContext && (
+                        <div
+                            className="rounded-xl p-5 mb-8 border"
+                            style={{
+                                background: "rgba(197,255,74,0.06)",
+                                borderColor: "rgba(197,255,74,0.22)",
+                            }}
+                        >
+                            <div className="flex items-center gap-2 mb-3">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="#C5FF4A">
+                                    <path d="M12 0L14.4 9.6L24 12L14.4 14.4L12 24L9.6 14.4L0 12L9.6 9.6L12 0Z" />
+                                </svg>
+                                <span className="font-mono text-[10px] tracking-[0.22em] uppercase accent-green">
+                                    Copilot · thread context
+                                </span>
+                            </div>
+                            <p
+                                className="text-[14px] leading-relaxed"
+                                style={{ color: "rgba(245,242,237,0.88)" }}
+                            >
+                                {threadContext.context}
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Conversation header */}
+                    <div className="flex items-center gap-3 mb-5">
+                        <span className="font-mono text-[10px] tracking-[0.25em] uppercase opacity-50">
+                            Conversation
+                        </span>
+                        <span
+                            className="flex-1 h-px"
+                            style={{ background: "rgba(245,242,237,0.08)" }}
+                        />
+                    </div>
+
+                    {/* Loading state for messages */}
+                    {isLoading && (
+                        <div className="space-y-4">
+                            {[1, 2, 3].map((i) => (
+                                <div
+                                    key={i}
+                                    className="rounded-xl p-5 border space-y-3"
+                                    style={{
+                                        background: "rgba(255,255,255,0.02)",
+                                        borderColor: "rgba(245,242,237,0.06)",
+                                    }}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className="h-10 w-10 rounded-full shimmer" />
+                                        <div className="space-y-1.5 flex-1">
+                                            <div className="h-3 w-32 shimmer rounded" />
+                                            <div className="h-2.5 w-48 shimmer rounded" />
+                                        </div>
+                                    </div>
+                                    <div className="h-3 w-full shimmer rounded" />
+                                    <div className="h-3 w-5/6 shimmer rounded" />
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Empty state */}
+                    {!isLoading && sortedMails.length === 0 && (
+                        <div
+                            className="rounded-xl p-12 border text-center"
+                            style={{
+                                background: "rgba(255,255,255,0.02)",
+                                borderColor: "rgba(245,242,237,0.06)",
+                            }}
+                        >
+                            <p className="font-serif-display text-2xl italic accent-purple mb-2">
+                                No thread found.
+                            </p>
+                            <p
+                                className="text-sm"
+                                style={{ color: "rgba(245,242,237,0.5)" }}
+                            >
+                                Couldn't load the conversation — try again in a moment.
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Conversation timeline */}
+                    {!isLoading && sortedMails.length > 0 && (
+                        <div className="relative">
+                            {/* vertical rail */}
+                            <div
+                                className="absolute left-5 top-5 bottom-5 w-px hidden sm:block"
+                                style={{ background: "rgba(245,242,237,0.08)" }}
+                            />
+
+                            <div className="space-y-4">
+                                {sortedMails.map((m, idx) => {
+                                    const sender = parseFrom(m.from);
+                                    const isLatest = idx === sortedMails.length - 1;
+
+                                    return (
+                                        <article
+                                            key={m.id}
+                                            className="relative rounded-xl p-5 border sm:ml-12"
+                                            style={{
+                                                background: isLatest
+                                                    ? "rgba(167,139,250,0.04)"
+                                                    : "rgba(255,255,255,0.02)",
+                                                borderColor: isLatest
+                                                    ? "rgba(167,139,250,0.20)"
+                                                    : "rgba(245,242,237,0.06)",
+                                            }}
+                                        >
+                                            {/* timeline dot */}
+                                            <div
+                                                className="absolute -left-7 top-7 h-3 w-3 rounded-full hidden sm:block"
+                                                style={{
+                                                    background: isLatest ? "#A78BFA" : "#3a3b40",
+                                                    boxShadow: isLatest
+                                                        ? "0 0 0 4px rgba(167,139,250,0.18)"
+                                                        : "0 0 0 4px #0F1015",
+                                                }}
+                                            />
+
+                                            {/* sender row */}
+                                            <div className="flex items-start gap-3 mb-4">
+                                                <div
+                                                    className="h-10 w-10 flex-none rounded-full grid place-items-center text-[13px] font-medium"
+                                                    style={{
+                                                        background: avatarColor(sender.name),
+                                                        color: "#0A0B0F",
+                                                    }}
+                                                >
+                                                    {initialsOf(sender.name)}
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <span className="text-[14px]">{sender.name}</span>
+                                                        {isLatest && (
+                                                            <span
+                                                                className="font-mono text-[9px] tracking-[0.22em] uppercase px-1.5 py-0.5 rounded"
+                                                                style={{
+                                                                    background: "rgba(167,139,250,0.14)",
+                                                                    color: "#A78BFA",
+                                                                }}
+                                                            >
+                                                                Latest
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="font-mono text-[11px] opacity-55 truncate">
+                                                        {sender.email}
+                                                    </div>
+                                                    <div className="font-mono text-[10px] tracking-[0.18em] uppercase opacity-40 mt-0.5">
+                                                        {new Date(m.time).toLocaleString("en-US", {
+                                                            weekday: "short",
+                                                            month: "short",
+                                                            day: "numeric",
+                                                            hour: "numeric",
+                                                            minute: "2-digit",
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* To / CC meta */}
+                                            <div
+                                                className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4 p-3 rounded-lg border"
+                                                style={{
+                                                    background: "rgba(0,0,0,0.20)",
+                                                    borderColor: "rgba(245,242,237,0.05)",
+                                                }}
+                                            >
+                                                <div>
+                                                    <div className="font-mono text-[9px] tracking-[0.22em] uppercase opacity-40 mb-1">
+                                                        To
+                                                    </div>
+                                                    <div className="text-[11px] opacity-80 break-words">
+                                                        {m.to || "—"}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="font-mono text-[9px] tracking-[0.22em] uppercase opacity-40 mb-1">
+                                                        CC
+                                                    </div>
+                                                    <div
+                                                        className="text-[11px] opacity-50 break-words"
+                                                        data-cc={m.cc}
+                                                    >
+                                                        {/* TODO: render CC contents */}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Per-mail Copilot summary */}
+                                            {m.intent && (
+                                                <div
+                                                    className="rounded-lg p-3 mb-4 border"
+                                                    style={{
+                                                        background: "rgba(197,255,74,0.05)",
+                                                        borderColor: "rgba(197,255,74,0.18)",
+                                                    }}
+                                                >
+                                                    <div className="flex items-center gap-1.5 mb-1.5">
+                                                        <svg
+                                                            width="10"
+                                                            height="10"
+                                                            viewBox="0 0 24 24"
+                                                            fill="#C5FF4A"
+                                                        >
+                                                            <path d="M12 0L14.4 9.6L24 12L14.4 14.4L12 24L9.6 14.4L0 12L9.6 9.6L12 0Z" />
+                                                        </svg>
+                                                        <span className="font-mono text-[9px] tracking-[0.22em] uppercase accent-green">
+                                                            Summary
+                                                        </span>
+                                                    </div>
+                                                    <p
+                                                        className="text-[12px] leading-relaxed"
+                                                        style={{ color: "rgba(245,242,237,0.85)" }}
+                                                    >
+                                                        {m.intent}
+                                                    </p>
+                                                </div>
+                                            )}
+
+                                            {/* Body */}
+                                            {m.body?.trim() ? (
+                                                <div
+                                                    className="text-[13px] leading-relaxed whitespace-pre-wrap"
+                                                    style={{
+                                                        color: "rgba(245,242,237,0.82)",
+                                                        wordBreak: "break-word",
+                                                    }}
+                                                >
+                                                    {m.body.trim()}
+                                                </div>
+                                            ) : (
+                                                <div className="text-[12px] italic opacity-40">
+                                                    (No plain-text body — HTML-only message.)
+                                                </div>
+                                            )}
+                                        </article>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* ─── Footer ─── */}
+                <div
+                    className="flex items-center gap-2 px-7 py-4 flex-none"
+                    style={{
+                        borderTop: "1px solid rgba(245,242,237,0.06)",
+                        background: "rgba(255,255,255,0.015)",
+                    }}
+                >
+                    <button
+                        onClick={() => setChatOpen(true)}
+                        type="button"
+                        className="flex-1 inline-flex items-center justify-center gap-2 py-2.5 rounded-lg font-mono text-[11px] tracking-[0.18em] uppercase"
+                        style={{ background: "#C5FF4A", color: "#0A0B0F" }}
+                    >
+                        Draft reply to thread
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onClose(false)}
                         className="px-4 py-2.5 rounded-lg font-mono text-[11px] tracking-[0.18em] uppercase border"
                         style={{
                             borderColor: "rgba(245,242,237,0.15)",
                             color: "rgba(245,242,237,0.7)",
                         }}
                     >
-                        Snooze
+                        Close
                     </button>
                 </div>
             </div>
+            {chatOpen && (
+                <DraftReplyChatModal
+                    threadId={threadId}
+                    threadSubject={mail.subject}
+                    initialDraft="" // optional pre-generated draft
+                    onClose={() => setChatOpen(false)}
+                />
+            )}
         </div>
     );
 };
@@ -942,5 +1400,461 @@ const MetaField: React.FC<{ label: string; value: string }> = ({
         <div className="text-[12px] opacity-80 break-words">{value || "—"}</div>
     </div>
 );
+
+
+const DraftReplyChatModal: React.FC<DraftReplyChatModalProps> = ({
+    threadId,
+    threadSubject,
+    onClose,
+    initialDraft = "",
+}) => {
+    const [messages, setMessages] = useState<ChatMessage[]>(() =>
+        initialDraft
+            ? [
+                {
+                    role: "assistant",
+                    content:
+                        "Here's a first draft based on the full thread. Tell me what to change — tone, length, specific wording, anything.",
+                },
+            ]
+            : [
+                {
+                    role: "assistant",
+                    content:
+                        "Ready when you are. Describe how you'd like to reply — formal, casual, push back, ask for clarification — and I'll draft it.",
+                },
+            ]
+    );
+    const [draft, setDraft] = useState<string>(initialDraft);
+    const [input, setInput] = useState<string>("");
+    const [isSending, setIsSending] = useState<boolean>(false);
+
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+    // Autofocus input on open
+    useEffect(() => {
+        inputRef.current?.focus();
+    }, []);
+
+    // ESC closes
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if (e.key === "Escape") onClose();
+        };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+    }, [onClose]);
+
+    // Auto-scroll to bottom when messages or sending state changes
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }, [messages, isSending]);
+
+    // Auto-resize textarea up to a max
+    useEffect(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = Math.min(el.scrollHeight, 140) + "px";
+    }, [input]);
+
+    const handleSend = async () => {
+        const trimmed = input.trim();
+        if (!trimmed || isSending) return;
+
+        const userMsg: ChatMessage = {
+            role: "user",
+            content: trimmed,
+            timestamp: new Date().toISOString(),
+        };
+
+        // Optimistic update: show user message + reset input + flag sending
+        const nextMessages = [...messages, userMsg];
+        setMessages(nextMessages);
+        setInput("");
+        setIsSending(true);
+
+        try {
+            const response: any = await sendDraftPrompt(
+                { thread_id: threadId, user_prompt: userMsg.content }
+            );
+
+            // Backend returns the canonical messages array — replace local state with it
+            const serverMessages: ChatMessage[] | undefined =
+                [...messages, userMsg, response?.data?.message];
+            const serverDraft: string | undefined = response?.data?.draft;
+
+            console.log('Server Messages is : ', serverMessages)
+
+            if (Array.isArray(serverMessages)) {
+                console.log(serverMessages)
+                setMessages(serverMessages);
+            }
+            if (typeof serverDraft === "string") {
+                setDraft(serverDraft);
+            }
+        } catch (err) {
+            console.error("Draft prompt failed:", err);
+            setMessages((prev) => [
+                ...prev,
+                {
+                    role: "assistant",
+                    content:
+                        "Hmm, that didn't go through. Try again — and if it keeps happening, the connection's probably hiccupping.",
+                },
+            ]);
+        } finally {
+            setIsSending(false);
+            // Refocus input for next prompt
+            setTimeout(() => inputRef.current?.focus(), 50);
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        // Enter sends, Shift+Enter inserts newline
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+        }
+    };
+
+    // Filter out system messages from display (still kept in state for backend)
+    const visibleMessages = messages.filter((m) => m.role !== "system");
+
+    return (
+        <div className="fixed inset-0 z-[60] flex items-stretch justify-center">
+            {/* Backdrop */}
+            <div
+                className="drawer-backdrop absolute inset-0"
+                style={{
+                    background: "rgba(10,11,15,0.78)",
+                    backdropFilter: "blur(8px)",
+                }}
+                onClick={onClose}
+            />
+
+            {/* Inline styles for animations specific to this modal */}
+            <style>{`
+        @keyframes msgIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        .msg-in { animation: msgIn 0.3s cubic-bezier(0.2,0.7,0.2,1) forwards; }
+ 
+        @keyframes thinkingBounce {
+          0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+          40% { transform: scale(1); opacity: 1; }
+        }
+        .think-dot {
+          display: inline-block;
+          width: 6px; height: 6px; border-radius: 9999px;
+          background: #A78BFA;
+          animation: thinkingBounce 1.4s infinite ease-in-out both;
+        }
+        .think-dot:nth-child(1) { animation-delay: -0.32s; }
+        .think-dot:nth-child(2) { animation-delay: -0.16s; }
+ 
+        .chat-scroll::-webkit-scrollbar { width: 6px; }
+        .chat-scroll::-webkit-scrollbar-track { background: transparent; }
+        .chat-scroll::-webkit-scrollbar-thumb { background: rgba(245,242,237,0.15); border-radius: 3px; }
+        .chat-scroll::-webkit-scrollbar-thumb:hover { background: rgba(245,242,237,0.25); }
+ 
+        .chat-input::placeholder { color: rgba(245,242,237,0.35); }
+        .chat-input:focus { outline: none; }
+ 
+        @keyframes chatModalIn {
+          from { transform: translateY(20px) scale(0.98); opacity: 0; }
+          to   { transform: translateY(0) scale(1); opacity: 1; }
+        }
+        .chat-modal-panel { animation: chatModalIn 0.3s cubic-bezier(0.2,0.7,0.2,1) forwards; }
+ 
+        .send-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: 0 12px 24px -8px rgba(197,255,74,0.4);
+        }
+        .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .send-btn { transition: all 0.18s ease; }
+      `}</style>
+
+            {/* Panel — slightly narrower than thread modal so it feels like a focused tool */}
+            <div
+                className="chat-modal-panel relative h-full w-full max-w-3xl flex flex-col my-0"
+                style={{
+                    background: "#0F1015",
+                    borderLeft: "1px solid rgba(245,242,237,0.08)",
+                    borderRight: "1px solid rgba(245,242,237,0.08)",
+                    boxShadow: "0 0 80px -10px rgba(0,0,0,0.85)",
+                }}
+            >
+                {/* ─── Header ─── */}
+                <div
+                    className="flex items-center justify-between px-7 py-5 flex-none"
+                    style={{ borderBottom: "1px solid rgba(245,242,237,0.06)" }}
+                >
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div
+                            className="h-8 w-8 flex-none grid place-items-center rounded-md"
+                            style={{
+                                background:
+                                    "linear-gradient(135deg, #C5FF4A 0%, #A78BFA 100%)",
+                            }}
+                        >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                                <path
+                                    d="M12 2L4 7L12 12L20 7L12 2Z M4 17L12 22L20 17 M4 12L12 17L20 12"
+                                    stroke="#0A0B0F"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                            </svg>
+                        </div>
+                        <div className="min-w-0">
+                            <p className="font-mono text-[9px] tracking-[0.28em] uppercase opacity-50">
+                                / Drafting reply
+                            </p>
+                            <p className="text-[14px] truncate">
+                                <span className="italic" style={{ fontFamily: "'Fraunces', serif", color: "#A78BFA" }}>
+                                    Re:
+                                </span>{" "}
+                                <span className="opacity-90">
+                                    {threadSubject || "(no subject)"}
+                                </span>
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="h-8 w-8 flex-none grid place-items-center rounded-md hover:bg-white/5 transition-colors"
+                        aria-label="Close"
+                    >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                            <path
+                                d="M6 6L18 18M6 18L18 6"
+                                stroke="#F5F2ED"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                            />
+                        </svg>
+                    </button>
+                </div>
+
+                {/* ─── Live Draft Preview (top) ─── */}
+                {draft && (
+                    <div
+                        className="flex-none px-7 pt-5 pb-4"
+                        style={{
+                            borderBottom: "1px solid rgba(245,242,237,0.06)",
+                            background: "rgba(255,255,255,0.015)",
+                        }}
+                    >
+                        <div className="flex items-center gap-2 mb-2.5">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="#C5FF4A">
+                                <path d="M12 0L14.4 9.6L24 12L14.4 14.4L12 24L9.6 14.4L0 12L9.6 9.6L12 0Z" />
+                            </svg>
+                            <span
+                                className="font-mono text-[9px] tracking-[0.22em] uppercase"
+                                style={{ color: "#C5FF4A" }}
+                            >
+                                Current draft
+                            </span>
+                            <span className="flex-1 h-px" style={{ background: "rgba(245,242,237,0.06)" }} />
+                            <button
+                                type="button"
+                                onClick={() => navigator.clipboard?.writeText(draft)}
+                                className="font-mono text-[9px] tracking-[0.22em] uppercase opacity-50 hover:opacity-100 transition-opacity"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                        <div
+                            className="rounded-lg p-4 max-h-[160px] overflow-y-auto chat-scroll text-[13px] leading-relaxed whitespace-pre-wrap"
+                            style={{
+                                background: "rgba(197,255,74,0.05)",
+                                border: "1px solid rgba(197,255,74,0.18)",
+                                color: "rgba(245,242,237,0.92)",
+                                fontFamily: "'Geist', system-ui, sans-serif",
+                            }}
+                        >
+                            {draft}
+                        </div>
+                    </div>
+                )}
+
+                {/* ─── Chat scroll area ─── */}
+                <div
+                    ref={scrollRef}
+                    className="chat-scroll flex-1 overflow-y-auto px-7 py-6"
+                >
+                    <div className="space-y-4">
+                        {visibleMessages.map((m, idx) => (
+                            <ChatBubble key={m.id || `${m.role}-${idx}`} message={m} />
+                        ))}
+
+                        {/* Thinking indicator */}
+                        {isSending && (
+                            <div className="msg-in flex justify-start">
+                                <div className="flex items-end gap-2 max-w-[85%]">
+                                    <div
+                                        className="h-7 w-7 flex-none rounded-full grid place-items-center"
+                                        style={{
+                                            background: "linear-gradient(135deg, #C5FF4A 0%, #A78BFA 100%)",
+                                        }}
+                                    >
+                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="#0A0B0F">
+                                            <path d="M12 0L14.4 9.6L24 12L14.4 14.4L12 24L9.6 14.4L0 12L9.6 9.6L12 0Z" />
+                                        </svg>
+                                    </div>
+                                    <div
+                                        className="rounded-2xl rounded-bl-sm px-4 py-3 flex items-center gap-1"
+                                        style={{
+                                            background: "rgba(167,139,250,0.10)",
+                                            border: "1px solid rgba(167,139,250,0.22)",
+                                        }}
+                                    >
+                                        <span className="think-dot" />
+                                        <span className="think-dot" />
+                                        <span className="think-dot" />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* ─── Input bar ─── */}
+                <div
+                    className="flex-none px-7 py-4"
+                    style={{
+                        borderTop: "1px solid rgba(245,242,237,0.06)",
+                        background: "rgba(255,255,255,0.015)",
+                    }}
+                >
+                    <div
+                        className="flex items-end gap-3 rounded-xl p-3 border"
+                        style={{
+                            background: "rgba(0,0,0,0.30)",
+                            borderColor: "rgba(245,242,237,0.10)",
+                        }}
+                    >
+                        <textarea
+                            ref={inputRef}
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            rows={1}
+                            disabled={isSending}
+                            placeholder="Tell Copilot how to tailor the reply… (e.g. “make it more apologetic”, “shorter”, “push back politely”)"
+                            className="chat-input flex-1 bg-transparent border-none resize-none text-[14px] leading-relaxed"
+                            style={{
+                                color: "#F5F2ED",
+                                fontFamily: "'Geist', system-ui, sans-serif",
+                                minHeight: "24px",
+                                maxHeight: "140px",
+                            }}
+                        />
+                        <button
+                            type="button"
+                            onClick={handleSend}
+                            disabled={!input.trim() || isSending}
+                            className="send-btn flex-none inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-mono text-[11px] tracking-[0.18em] uppercase"
+                            style={{
+                                background: "#C5FF4A",
+                                color: "#0A0B0F",
+                            }}
+                        >
+                            Send
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                                <path
+                                    d="M5 12H19M19 12L13 6M19 12L13 18"
+                                    stroke="#0A0B0F"
+                                    strokeWidth="2.2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                />
+                            </svg>
+                        </button>
+                    </div>
+
+                    {/* Footer hint row */}
+                    <div className="flex items-center justify-between mt-3 px-1">
+                        <span className="font-mono text-[9px] tracking-[0.22em] uppercase opacity-40">
+                            Enter to send · Shift + Enter for newline
+                        </span>
+                        {draft && (
+                            <button
+                                type="button"
+                                className="font-mono text-[9px] tracking-[0.22em] uppercase opacity-70 hover:opacity-100 transition-opacity"
+                                style={{ color: "#C5FF4A" }}
+                            >
+                                Use this draft →
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ─────────── Chat bubble ───────────
+const ChatBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
+    const isUser = message.role === "user";
+
+    if (isUser) {
+        return (
+            <div className="msg-in flex justify-end">
+                <div className="flex items-end gap-2 max-w-[85%] flex-row-reverse">
+                    {/* User pill — no avatar; use a small lime tag */}
+                    <div
+                        className="rounded-2xl rounded-br-sm px-4 py-3 text-[13px] leading-relaxed whitespace-pre-wrap"
+                        style={{
+                            background: "#C5FF4A",
+                            color: "#0A0B0F",
+                            wordBreak: "break-word",
+                            fontFamily: "'Geist', system-ui, sans-serif",
+                        }}
+                    >
+                        {message.content}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // Assistant
+    return (
+        <div className="msg-in flex justify-start">
+            <div className="flex items-end gap-2 max-w-[85%]">
+                <div
+                    className="h-7 w-7 flex-none rounded-full grid place-items-center"
+                    style={{
+                        background: "linear-gradient(135deg, #C5FF4A 0%, #A78BFA 100%)",
+                    }}
+                >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="#0A0B0F">
+                        <path d="M12 0L14.4 9.6L24 12L14.4 14.4L12 24L9.6 14.4L0 12L9.6 9.6L12 0Z" />
+                    </svg>
+                </div>
+                <div
+                    className="rounded-2xl rounded-bl-sm px-4 py-3 text-[13px] leading-relaxed whitespace-pre-wrap"
+                    style={{
+                        background: "rgba(167,139,250,0.10)",
+                        border: "1px solid rgba(167,139,250,0.22)",
+                        color: "rgba(245,242,237,0.92)",
+                        wordBreak: "break-word",
+                        fontFamily: "'Geist', system-ui, sans-serif",
+                    }}
+                >
+                    {message.content}
+                </div>
+            </div>
+        </div>
+    );
+};
 
 export default Home;
