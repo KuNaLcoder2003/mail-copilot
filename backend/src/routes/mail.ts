@@ -2,7 +2,7 @@ import express from "express"
 import { google } from "googleapis"
 import { prisma } from "../prisma.js"
 import dotenv from "dotenv"
-import { generateReply, getContext } from "../functions/mailParser.js"
+import { generateReply, generateReplyBasedOnThreadContext, generateReplyBasedOnThreadContextAndUserPrompt, getContext } from "../functions/mailParser.js"
 import { cleanAndParseAiResponse } from "../functions/createMail.js"
 dotenv.config()
 const CLIENT_ID = `${process.env.GOOGLE_CLIENT_ID}`
@@ -80,7 +80,7 @@ mailRouter.post('/generateReply', async (req: express.Request, res: express.Resp
     }
 })
 
-mailRouter.get("/fullContext", async (req: express.Request, res: express.Response) => {
+mailRouter.post("/fullContext", async (req: express.Request, res: express.Response) => {
     try {
         const { thread_id, user_id } = req.body
 
@@ -172,6 +172,180 @@ mailRouter.get("/fullContext", async (req: express.Request, res: express.Respons
         console.log(error)
         res.status(500).json({
             message: "Unable to get full context",
+            valid: false,
+            error: error
+        })
+    }
+})
+
+mailRouter.get('/thread/:id', async (req: express.Request, res: express.Response) => {
+    try {
+        const thread_id = req.params.id as string
+        if (!thread_id) {
+            return
+        }
+        const mails = await prisma.mails.findMany({
+            where: {
+                thread_id: thread_id
+            }
+        })
+        const threadContext = await prisma.threadContext.findUnique({
+            where: {
+                thread_id: thread_id
+            }
+        })
+        // if not generated , then generate and send the response -> later
+        if (!threadContext) {
+            res.status(402).json({
+                message: "Context Not yet generated",
+                valid: false
+            })
+            return
+        }
+        res.status(200).json({
+            thread_context: threadContext,
+            mails,
+            valid: true
+        })
+    } catch (error) {
+        console.log(error)
+        res.status(500).json({
+            message: "Something went wrong",
+            valid: false,
+            error: error
+        })
+    }
+})
+
+mailRouter.post('/reply/:threadId', async (req: express.Request, res: express.Response) => {
+    try {
+        const thread_id = req.params.threadId as string
+        if (!thread_id) {
+            res.status(400).json({
+                message: "Bad request",
+                valid: false
+            })
+            return
+        }
+        const mails = await prisma.mails.findMany({
+            where: {
+                thread_id: thread_id
+            },
+            select: {
+                body: true,
+                html: true,
+                intent: true
+            }
+        })
+        const thread_context = await prisma.threadContext.findUnique({
+            where: {
+                thread_id: thread_id
+            },
+            select: {
+                context: true,
+                user: {
+                    select: {
+                        email: true
+                    }
+                }
+            }
+        })
+        // if not found then create on the go
+        if (!thread_context) {
+            res.status(402).json({
+                message: "Thread context not found",
+                valid: false
+            })
+            return
+        }
+        const ai_response = await generateReplyBasedOnThreadContext(thread_context?.context, mails, thread_context.user.email)
+        if (!ai_response) {
+            res.status(402).json({
+                message: "Unable to generate reply",
+                valid: false
+            })
+            return
+        }
+        const cleaned_ai_responnse = cleanAndParseAiResponse(ai_response)
+        const reply = cleaned_ai_responnse.reply;
+
+        console.log(reply)
+        res.status(200).json({
+            reply,
+        })
+    } catch (error) {
+        console.log(error)
+        res.status(500).json({
+            message: "Something went wrong",
+            valid: false,
+            error: error
+        })
+    }
+})
+
+mailRouter.post('/tweakReply', async (req: express.Request, res: express.Response) => {
+    try {
+        const { thread_id, user_message } = req.body
+        if (!thread_id) {
+            res.status(400).json({
+                message: "Bad request",
+                valid: false
+            })
+            return
+        }
+        const mails = await prisma.mails.findMany({
+            where: {
+                thread_id: thread_id
+            },
+            select: {
+                body: true,
+                html: true,
+                intent: true
+            }
+        })
+        const thread_context = await prisma.threadContext.findUnique({
+            where: {
+                thread_id: thread_id
+            },
+            select: {
+                context: true,
+                user: {
+                    select: {
+                        email: true
+                    }
+                }
+            }
+        })
+        // if not found then create on the go
+        if (!thread_context) {
+            res.status(402).json({
+                message: "Thread context not found",
+                valid: false
+            })
+            return
+        }
+        const ai_response = await generateReplyBasedOnThreadContextAndUserPrompt(thread_context?.context, mails, thread_context.user.email, user_message)
+        if (!ai_response) {
+            res.status(402).json({
+                message: "Unable to generate reply",
+                valid: false
+            })
+            return
+        }
+        console.log(ai_response)
+        const cleaned_ai_responnse = cleanAndParseAiResponse(ai_response)
+        const message = {
+            id: new Date(),
+            role: "assistant",
+            content: cleaned_ai_responnse.reply
+        };
+        res.status(200).json({
+            message
+        })
+    } catch (error) {
+        console.log(error)
+        res.status(500).json({
+            message: "Something went wrong",
             valid: false,
             error: error
         })
