@@ -42,43 +42,49 @@ const authClient = new google.auth.OAuth2(
 )
 
 // function to extract parts of email that has actual body or html (mail content) => Uses Recusrion
-function iterateArray(arr: any) {
-    let result: any[] = []
-    if (!arr || arr == undefined) {
-        return []
+function iterateArray(arr: any, temp: any[] = [], seen = new Set(),
+    depth = 0) {
+    // this was a bug... every recursive call will inititae a new empty result array
+    // temp fix : providing a temp array as param , which will provided to the recursive call also , so no new array is initiated
+    // let result: any[] = []
+    if (!arr || depth > 40) {
+        return temp
     }
-    // console.log('Inside Recursive call')
-    // console.log('Inputs recvd : ', arr)
     for (let key in arr) {
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
         if (arr[key].filename) {
             continue
         } else if (arr[key].parts) {
-            iterateArray(arr[key].parts)
+            iterateArray(arr[key].parts, temp, seen, depth + 1)
         }
         else {
-            // console.log('Extracted parts : ', arr[key])
-            result.push(arr[key])
+            temp.push(arr[key])
         }
     }
-    return result
+    return temp
 }
 
 // for extracting josn object form AI response
 export function cleanAndParseAiResponse(str: string) {
+    console.log(str);
+
     if (!str) {
-        return
+        return;
     }
-    const raw_string = str;
 
-    // remove ```json and ``` wrappers
-    const cleaned = raw_string
-        .replace(/^```json\s*/, '')  // remove starting ```json
-        .replace(/```$/, '');        // remove ending ```
+    let cleaned = str.trim();
 
-    // parse JSON
-    const obj = JSON.parse(cleaned);
+    // Check if it's wrapped in ```json ... ```
+    if (cleaned.startsWith("```")) {
+        cleaned = cleaned
+            .replace(/^```json\s*/i, '') // remove ```json (case-insensitive)
+            .replace(/^```\s*/, '')     // fallback for ``` without json
+            .replace(/```$/, '')        // remove ending ```
+            .trim();
+    }
 
-    return obj
+    return JSON.parse(cleaned);
 }
 
 
@@ -137,6 +143,7 @@ async function getMailContent(user_mails: { messages: any[], user: User }[]) {
                         mail_id: mail_content.data.id,
                         thread_id: mail_content.data.threadId,
                         user: mail.user,
+                        payload: mail_content.data.payload,
                         headers: mail_content.data.payload?.headers,
                         parts: mail_content.data.payload?.parts
                     }
@@ -160,15 +167,17 @@ async function parseEmails(emails: any[]) {
         return null
     }
     const response = await Promise.all(emails.map((email: any) => {
-        const process = email.map(async (item: any) => {
-            const parts = iterateArray(item.parts)
+        const process = email.map(async (item: any, idx: number) => {
+
+            const parts = iterateArray(item.parts, [])
+
             const headers = item.headers;
             let obj: Mail = {
                 intent: "", // initaillaly empty -> will be updated based on AI response
                 mail_id: item.mail_id,
                 thread_id: item.thread_id,
-                html: parts && parts.filter((part: any) => part.mimeType == 'text/html')[0] ? Buffer.from(parts.filter((part: any) => part.mimeType == 'text/html')[0].body.data, "base64").toString("utf-8") : "",
-                body: parts && parts.filter((part: any) => part.mimeType == 'text/plain')[0] ? Buffer.from(parts.filter((part: any) => part.mimeType == 'text/plain')[0].body.data, "base64").toString("utf-8") : "",
+                html: parts && parts.filter((part: any) => part.mimeType == 'text/html')[0] ? Buffer.from(parts.filter((part: any) => part.mimeType == 'text/html')[0].body.data, "base64").toString("utf-8") : item.payload.mimeType == 'text/html' && item.payload.body?.data ? Buffer.from(item.payload.body?.data, "base64").toString("utf-8") : "",
+                body: parts && parts.filter((part: any) => part.mimeType == 'text/plain')[0] ? Buffer.from(parts.filter((part: any) => part.mimeType == 'text/plain')[0].body.data, "base64").toString("utf-8") : item.payload.mimeType == 'text/plain' && item.payload.body?.data ? Buffer.from(item.payload.body?.data, "base64").toString("utf-8") : "",
                 user_id: item.user.id,
                 from: headers ? headers.filter((head: any) => head.name == 'From')[0].value : "",
                 to: headers ? headers.filter((head: any) => head.name == 'To')[0].value : "",
@@ -177,29 +186,41 @@ async function parseEmails(emails: any[]) {
                 subject: headers && headers.filter((head: any) => head.name == 'Subject')[0] ? headers.filter((head: any) => head.name == 'Subject')[0].value : "",
                 category: "SALES" // initaillaly Sales -> will be updated based on AI response
             }
-            const response = await parseMail(obj.body || obj.html) // this is the AI call => AI gives intent 
-            const cleaned_response = cleanAndParseAiResponse(response)
-            if (!cleaned_response) {
-                obj.category = "SALES"
-                obj.intent = ""
-            }
-            else {
-                obj.category = cleaned_response.category
-                obj.intent = cleaned_response.intent
-            }
-            // console.log(cleaned_response)
-            // creating DB entry
-            // step - 4 : create entry in DB , if mail_id exists then skip , else create ( although DB schema as a @unique attribute for mail_id => so duplicates wont be allowed)
-            const entry = await prisma.$transaction(async (tx) => {
-                const new_mail = await tx.mails.create({
-                    data: obj
-                })
-                return new_mail
-            }, { timeout: 10000, maxWait: 5000 })
-            if (!entry) {
+            const exists = await prisma.mails.findUnique({
+                where: {
+                    mail_id: obj.mail_id
+                }
+            })
+
+            if (exists) {
                 return false
+            } else {
+                const response = await parseMail(obj.body || obj.html) // this is the AI call => AI gives intent 
+
+                const cleaned_response = cleanAndParseAiResponse(response)
+                if (!cleaned_response) {
+                    obj.category = "SALES"
+                    obj.intent = ""
+                }
+                else {
+                    obj.category = cleaned_response.category
+                    obj.intent = cleaned_response.intent
+                }
+                // console.log(cleaned_response)
+                // creating DB entry
+                // step - 4 : create entry in DB , if mail_id exists then skip , else create ( although DB schema as a @unique attribute for mail_id => so duplicates wont be allowed)
+
+                const entry = await prisma.$transaction(async (tx) => {
+                    const new_mail = await tx.mails.create({
+                        data: obj
+                    })
+                    return new_mail
+                }, { timeout: 10000, maxWait: 5000 })
+                if (!entry) {
+                    return false
+                }
+                return true
             }
-            return true
         })
         return process
     }))
@@ -219,9 +240,11 @@ async function main() {
     const data = await parseEmails(response)
     console.log(data)
 
-}
 
-main() // this function will be called in a cron job that will every minute or every hour , for testing purposes this has to be called manually 
+}
+// main()
+
+// main() // this function will be called in a cron job that will every minute or every hour , for testing purposes this has to be called manually 
 
 
 
